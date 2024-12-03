@@ -117,77 +117,59 @@ def separate_touching_contours(contour, min_area_ratio=0.15):
 def nothing(x):
     pass
 
-def processFrame(frame):
+def runPipeline(frame, llrobot):
     try:
         llpython = [0, 0, 0, 0, 0, 0, 0, 0]
         largest_contour = np.array([[]])
-        #frame = cv2.resize(frame, (256, 144))
-        cv2.imshow('1. Original Frame', frame)
+        frame = cv2.resize(frame, (256, 144))
         
         blur_size = BLUR_SIZE
         sobel_kernel = SOBEL_KERNEL
 
         # Convert to HSV and denoise
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        cv2.imshow('2. HSV Conversion', hsv)
         
         # Split and display HSV channels
         h, s, v = cv2.split(hsv)
-        cv2.imshow('2a. Hue Channel', h)
-        cv2.imshow('2b. Saturation Channel', s) 
-        cv2.imshow('2c. Value Channel', v)
         
         hsv_denoised = cv2.GaussianBlur(hsv, (5, 5), 0)
-        cv2.imshow('3. HSV Denoised', hsv_denoised)
         hsv_denoised = hsv
 
         # Create masks for each color
         blue_mask = cv2.inRange(hsv_denoised, np.array(HSV_BLUE_RANGE[0]), np.array(HSV_BLUE_RANGE[1]))
-        cv2.imshow('4. Blue Mask', blue_mask)
         
         red_mask1 = cv2.inRange(hsv_denoised, np.array(HSV_RED_RANGE_1[0]), np.array(HSV_RED_RANGE_1[1]))
         red_mask2 = cv2.inRange(hsv_denoised, np.array(HSV_RED_RANGE_2[0]), np.array(HSV_RED_RANGE_2[1]))
         red_mask = cv2.bitwise_or(red_mask1, red_mask2)
-        cv2.imshow('5. Red Mask', red_mask)
         
         yellow_mask = cv2.inRange(hsv_denoised, np.array(HSV_YELLOW_RANGE[0]), np.array(HSV_YELLOW_RANGE[1]))
-        cv2.imshow('6. Yellow Mask', yellow_mask)
 
         # Combine all color masks
         combined_mask = cv2.bitwise_or(cv2.bitwise_or(blue_mask, red_mask), yellow_mask)
-        cv2.imshow('7. Combined Color Mask', combined_mask)
         
         kernel = np.ones((5,5), np.uint8)
         masked_frame = cv2.bitwise_and(frame, frame, mask=combined_mask)
-        cv2.imshow('8. Masked Original Frame', masked_frame)
         
         gray_masked = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
-        cv2.imshow('9. Gray Masked Frame', gray_masked)
         
         # Edge detection pipeline
         blurred = cv2.GaussianBlur(gray_masked, (blur_size, blur_size), 0)
-        cv2.imshow('10. Blurred Frame', blurred)
         
         sobelx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=sobel_kernel)
         sobely = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=sobel_kernel)
         
         magnitude = np.sqrt(sobelx**2 + sobely**2)
         magnitude = np.uint8(magnitude * 255 / np.max(magnitude))
-        cv2.imshow('11. Sobel Magnitude', magnitude)
         
         # Threshold the magnitude image
         _, edges = cv2.threshold(magnitude, 50, 255, cv2.THRESH_BINARY)
-        cv2.imshow('12. Thresholded Magnitude', edges)
         
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-        cv2.imshow('13. Morphological Closing', edges)
         
         edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=3)
-        cv2.imshow('14. Dilated Edges', edges)
         
         edges = cv2.bitwise_not(edges)
         edges = cv2.bitwise_and(edges, edges, mask=combined_mask)
-        cv2.imshow('15. Final Edge Mask', edges)
 
         contours, hierarchy = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -202,94 +184,89 @@ def processFrame(frame):
             for sep_contour in separate_touching_contours(contour):
                 mask = np.zeros(gray.shape, dtype=np.uint8)
                 cv2.drawContours(mask, [sep_contour], -1, 255, -1)
-                cv2.imshow('17. Current Contour Mask', mask)
                 
                 if cv2.mean(gray, mask=mask)[0] < MIN_BRIGHTNESS_THRESHOLD:
                     continue
                 
+                angle = calculate_angle(sep_contour)
                 M = cv2.moments(sep_contour)
-                if M["m00"] == 0:
+                if M["m00"] != 0:
+                    center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+                else:
                     continue
                     
-                center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-                angle = calculate_angle(sep_contour)
                 area = cv2.contourArea(sep_contour)
+                vertices = len(sep_contour)
+                
+                color = (0, 255, 0) if hierarchy[0][i][3] == -1 else (0, 0, 255)
+                    
+                cv2.drawContours(frame, [sep_contour], 0, color, 2)
+                
+                # Add visualization from testcv.py
+                cv2.putText(frame, f"#{len(game_pieces)+1}: Blue", (center[0] - 40, center[1] - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(frame, f"Angle: {angle:.2f}", (center[0] - 40, center[1] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(frame, f"Area: {area:.2f}", (center[0] - 40, center[1] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(frame, f"Vertices: {vertices}", (center[0] - 40, center[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.circle(frame, center, 5, (0, 255, 0), -1)
+                cv2.line(frame, center, (int(center[0] + 50 * math.cos(math.radians(90 - angle))), 
+                                      int(center[1] - 50 * math.sin(math.radians(90 - angle)))), (0, 255, 0), 2)
+                
+                game_pieces.append({
+                    'index': len(game_pieces) + 1,
+                    'color': "Blue",
+                    'position': center,
+                    'angle': angle,
+                    'area': area,
+                    'hierarchy_level': 'external' if hierarchy[0][i][3] == -1 else 'internal'
+                })
 
-                # Determine color of the piece by checking overlap with color masks
-                roi_mask = np.zeros_like(gray)
-                cv2.drawContours(roi_mask, [sep_contour], -1, 255, -1)
-                cv2.imshow('18. ROI Mask', roi_mask)
-                
-                # Calculate percentage of overlap with each color mask
-                total_area = cv2.countNonZero(roi_mask)
-                blue_overlap = cv2.countNonZero(cv2.bitwise_and(blue_mask, roi_mask)) / total_area
-                red_overlap = cv2.countNonZero(cv2.bitwise_and(red_mask, roi_mask)) / total_area
-                yellow_overlap = cv2.countNonZero(cv2.bitwise_and(yellow_mask, roi_mask)) / total_area
-                
-                # Assign color based on highest overlap percentage (minimum 70% overlap required)
-                color = "Unknown"
-                max_overlap = max(blue_overlap, red_overlap, yellow_overlap)
-                if max_overlap > 0.7:  # At least 70% of the contour must be the detected color
-                    if blue_overlap == max_overlap:
-                        color = "Blue"
-                    elif red_overlap == max_overlap:
-                        color = "Red"
-                    elif yellow_overlap == max_overlap:
-                        color = "Yellow"
-                
-                color_map = {"Blue": (255, 0, 0), "Red": (0, 0, 255), "Yellow": (0, 255, 255)}
-                if color in color_map:  # Only draw if a valid color was detected
-                    cv2.drawContours(contour_frame, [sep_contour], 0, color_map[color], 2)
-                    draw_info(contour_frame, color, angle, center, len(game_pieces) + 1, area)
-                    cv2.imshow('19. Current Detection', contour_frame)
-                
-                    game_pieces.append({
-                        'index': len(game_pieces) + 1,
-                        'color': color,
-                        'position': center,
-                        'angle': angle,
-                        'area': area,
-                        'brightness': cv2.mean(gray, mask=mask)[0],
-                        'hierarchy_level': 'external' if hierarchy[0][i][3] == -1 else 'internal'
-                    })
+                # Update largest_contour if this is the first valid contour
+                if len(game_pieces) == 1:
+                    largest_contour = sep_contour
+
+        if len(game_pieces) > 0:
+            llpython = [1, center[0], center[1], angle, 0, 0, 0, 0]
         
-        cv2.imshow('16. Final Output', contour_frame)
-        return contour_frame
+        return largest_contour, frame, llpython
 
     except Exception as e:
-        print(frame, f"Error: {str(e)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        return frame
+        cv2.putText(frame, f"Error: {str(e)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        return np.array([[]]), frame, [0, 0, 0, 0, 0, 0, 0, 0]
 
-def main():
-    cap = cv2.VideoCapture(0)
+
+
+
+
+# def main():
+#     cap = cv2.VideoCapture(0)
     
-    # Set camera properties
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+#     # Set camera properties
+#     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+#     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+#     cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
 
-    actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+#     actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+#     actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+#     actual_fps = cap.get(cv2.CAP_PROP_FPS)
         
-    print(f"Camera settings:")
-    print(f"Requested: {CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FPS}fps")
-    print(f"Actual: {actual_width}x{actual_height} @ {actual_fps}fps")
+#     print(f"Camera settings:")
+#     print(f"Requested: {CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FPS}fps")
+#     print(f"Actual: {actual_width}x{actual_height} @ {actual_fps}fps")
 
-    while True:
-        ret, frame = cap.read()
+#     while True:
+#         ret, frame = cap.read()
 
-        if not ret:
-            print("Failed to grab frame")
-            break
+#         if not ret:
+#             print("Failed to grab frame")
+#             break
 
-        processed_frame = processFrame(frame)
+#         processed_frame, _, _ = runPipeline(frame, None)
+#         cv2.imshow('16. Final Output', processed_frame)
+#         if cv2.waitKey(1) & 0xFF == ord('q'):
+#             break
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+#     cap.release()
+#     cv2.destroyAllWindows()
 
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
