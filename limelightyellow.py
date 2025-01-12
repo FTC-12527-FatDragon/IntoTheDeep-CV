@@ -44,7 +44,7 @@ SMALL_CONTOUR_AREA = 200
 MIN_BRIGHTNESS_THRESHOLD = 60
 
 # Color detection ranges for yellow in HSV
-HSV_YELLOW_RANGE = ([10, 120, 10], [30, 255, 255])
+HSV_YELLOW_RANGE = ([10, 120, 50], [30, 255, 255])
 
 # Edge detection parameters - initial values
 BLUR_SIZE = 17
@@ -64,31 +64,109 @@ def draw_info(image, color, angle, center, index, area):
     cv2.line(image, center, (int(center[0] + 50 * math.cos(math.radians(90 - angle))), 
                              int(center[1] - 50 * math.sin(math.radians(90 - angle)))), (0, 255, 0), 2)
 
-def separate_touching_contours(contour, min_area_ratio=0.15):
+def separate_touching_contours(contour, gray_masked, min_area_ratio=0.15):
+    # 获取轮廓的边界框
     x, y, w, h = cv2.boundingRect(contour)
+    
+    # 创建掩码
     mask = np.zeros((h, w), dtype=np.uint8)
     shifted_contour = contour - [x, y]
     cv2.drawContours(mask, [shifted_contour], -1, 255, -1)
-
+    
+    # 计算原始面积
     original_area = cv2.contourArea(contour)
-    max_contours = []
-    max_count = 1
-
-    dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
-
-    for threshold in np.linspace(0.1, 0.9, 9):
-        _, thresh = cv2.threshold(dist_transform, threshold * dist_transform.max(), 255, 0)
-        thresh = np.uint8(thresh)
-
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        valid_contours = [c for c in contours if cv2.contourArea(c) > original_area * min_area_ratio]
-
-        if len(valid_contours) > max_count:
-            max_count = len(valid_contours)
-            max_contours = valid_contours
-
-    if max_contours:
-        return [c + [x, y] for c in max_contours]
+    
+    # 获取最小面积矩形以确定旋转角度
+    rect = cv2.minAreaRect(contour)
+    angle = rect[2]
+    if rect[1][0] < rect[1][1]:
+        angle = angle + 90
+        
+    # 创建旋转矩阵
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    
+    # 旋转掩码和灰度图像
+    rotated_mask = cv2.warpAffine(mask, M, (w, h))
+    
+    # 提取并旋转对应的灰度图像区域
+    gray_roi = np.zeros((h, w), dtype=np.uint8)
+    gray_roi[mask > 0] = gray_masked[y:y+h, x:x+w][mask > 0]
+    rotated_gray = cv2.warpAffine(gray_roi, M, (w, h))
+    
+    # 计算垂直投影
+    vertical_proj = np.sum(rotated_mask, axis=0)
+    valid_region = vertical_proj > 0
+    
+    if not np.any(valid_region):
+        return [contour]
+    
+    # 在有效区域内分析亮度
+    start_x = np.where(valid_region)[0][0]
+    end_x = np.where(valid_region)[0][-1]
+    
+    # 计算每列的平均亮度
+    brightness_profile = []
+    for i in range(start_x, end_x + 1):
+        col_mask = rotated_mask[:, i] > 0
+        if np.any(col_mask):
+            avg_brightness = np.mean(rotated_gray[col_mask, i])
+            brightness_profile.append(avg_brightness)
+        else:
+            brightness_profile.append(0)
+    
+    brightness_profile = np.array(brightness_profile)
+    
+    # 平滑亮度曲线
+    smoothed = cv2.GaussianBlur(brightness_profile.astype(np.float32), (11, 1), 2)
+    
+    # 寻找显著的暗色区域（缝隙）
+    valleys = []
+    window = 15  # 搜索窗口大小
+    
+    for i in range(window, len(smoothed) - window):
+        left_mean = np.mean(smoothed[i-window:i])
+        right_mean = np.mean(smoothed[i:i+window])
+        current = smoothed[i]
+        
+        # 如果当前点显著低于两侧，认为是缝隙
+        if (current < left_mean * 0.75 and 
+            current < right_mean * 0.75 and 
+            current < np.mean(smoothed) * 0.8):
+            valleys.append(i)
+    
+    # 如果找到缝隙，根据缝隙位置分割轮廓
+    if valleys:
+        separated_contours = []
+        prev_x = start_x
+        
+        # 创建反向旋转矩阵
+        M_inv = cv2.getRotationMatrix2D(center, -angle, 1.0)
+        
+        # 根据缝隙位置分割
+        for valley in valleys + [end_x - start_x]:
+            # 创建当前部分的掩码
+            part_mask = np.zeros_like(rotated_mask)
+            part_mask[:, prev_x:valley + start_x] = rotated_mask[:, prev_x:valley + start_x]
+            
+            # 反向旋转
+            part_mask = cv2.warpAffine(part_mask, M_inv, (w, h))
+            
+            # 找到轮廓
+            part_contours, _ = cv2.findContours(part_mask, cv2.RETR_EXTERNAL, 
+                                              cv2.CHAIN_APPROX_SIMPLE)
+            
+            # 添加面积足够大的轮廓
+            for pc in part_contours:
+                if cv2.contourArea(pc) > original_area * min_area_ratio:
+                    separated_contours.append(pc + [x, y])
+            
+            prev_x = valley + start_x
+        
+        if separated_contours:
+            return separated_contours
+    
+    # 如果没有找到有效的分离点，返回原始轮廓
     return [contour]
 
 def process_color(frame, mask):
@@ -180,7 +258,7 @@ def runPipeline(frame, llrobot):
             if cv2.contourArea(contour) < SMALL_CONTOUR_AREA:
                 continue
 
-            for sep_contour in separate_touching_contours(contour):
+            for sep_contour in separate_touching_contours(contour, yellow_gray):
                 mask = np.zeros(yellow_gray.shape, dtype=np.uint8)
                 cv2.drawContours(mask, [sep_contour], -1, 255, -1)
                 cv2.imshow('14. Contour Mask', mask)
